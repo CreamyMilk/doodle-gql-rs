@@ -1,85 +1,57 @@
-#[macro_use] extern crate juniper;
+//! Actix Web juniper example
+//!
+//! A simple example integrating juniper in Actix Web
 
-use juniper::{FieldResult};
+use std::{io, sync::Arc};
 
+use actix_cors::Cors;
+use actix_web::{
+    get, middleware, route,
+    web::{self, Data},
+    App, HttpResponse, HttpServer, Responder,
+};
+use actix_web_lab::respond::Html;
+use juniper::http::{graphiql::graphiql_source, GraphQLRequest};
 
-#[derive(GraphQLEnum)]
-enum Episode {
-    NewHope,
-    Empire,
-    Jedi,
+mod schema;
+
+use crate::schema::{create_schema, Schema};
+
+/// GraphiQL playground UI
+#[get("/graphiql")]
+async fn graphql_playground() -> impl Responder {
+    Html(graphiql_source("/graphql", None))
 }
 
-#[derive(GraphQLObject)]
-#[graphql(description="A humanoid creature in the Star Wars universe")]
-struct Human {
-    id: String,
-    name: String,
-    appears_in: Vec<Episode>,
-    home_planet: String,
+/// GraphQL endpoint
+#[route("/graphql", method = "GET", method = "POST")]
+async fn graphql(st: web::Data<Schema>, data: web::Json<GraphQLRequest>) -> impl Responder {
+    let user = data.execute(&st, &()).await;
+    HttpResponse::Ok().json(user)
 }
 
-// There is also a custom derive for mapping GraphQL input objects.
+#[actix_web::main]
+async fn main() -> io::Result<()> {
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
-#[derive(GraphQLInputObject)]
-#[graphql(description="A humanoid creature in the Star Wars universe")]
-struct NewHuman {
-    name: String,
-    appears_in: Vec<Episode>,
-    home_planet: String,
-}
+    // Create Juniper schema
+    let schema = Arc::new(create_schema());
 
-// Now, we create our root Query and Mutation types with resolvers by using the
-// graphql_object! macro.
-// Objects can have contexts that allow accessing shared state like a database
-// pool.
+    log::info!("starting HTTP server on port 8080");
+    log::info!("GraphiQL playground: http://localhost:8080/graphiql");
 
-struct Context {
-    // Use your real database pool here.
-    pool: DatabasePool,
-}
-
-// To make our context usable by Juniper, we have to implement a marker trait.
-impl juniper::Context for Context {}
-
-struct Query;
-
-graphql_object!(Query: Context |&self| {
-
-    field apiVersion() -> &str {
-        "1.0"
-    }
-
-    // Arguments to resolvers can either be simple types or input objects.
-    // The executor is a special (optional) argument that allows accessing the context.
-    field human(&executor, id: String) -> FieldResult<Human> {
-        // Get the context from the executor.
-        let context = executor.context();
-        // Get a db connection.
-        let connection = context.pool.get_connection()?;
-        // Execute a db query.
-        // Note the use of `?` to propagate errors.
-        let human = connection.find_human(&id)?;
-        // Return the result.
-        Ok(human)
-    }
-});
-
-struct Mutation;
-
-graphql_object!(Mutation: Context |&self| {
-
-    field createHuman(&executor, new_human: NewHuman) -> FieldResult<Human> {
-        let db = executor.context().pool.get_connection()?;
-        let human: Human = db.insert_human(&new_human)?;
-        Ok(human)
-    }
-});
-
-// A root schema consists of a query and a mutation.
-// Request queries can be executed against a RootNode.
-type Schema = juniper::RootNode<'static, Query, Mutation>;
-
-fn main() {
-    println!("Hello, world!");
+    // Start HTTP server
+    HttpServer::new(move || {
+        App::new()
+            .app_data(Data::from(schema.clone()))
+            .service(graphql)
+            .service(graphql_playground)
+            // the graphiql UI requires CORS to be enabled
+            .wrap(Cors::permissive())
+            .wrap(middleware::Logger::default())
+    })
+    .workers(2)
+    .bind(("127.0.0.1", 8080))?
+    .run()
+    .await
 }
